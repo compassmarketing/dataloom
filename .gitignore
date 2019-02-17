@@ -1,0 +1,7 @@
+data/
+.idea/
+spark-warehouse/
+target/
+mainRunner/
+.terraform/
+project/target/

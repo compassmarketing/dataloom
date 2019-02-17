@@ -1,0 +1,42 @@
+jobs:
+- sparkJob:
+    args:
+      - gs://bucket/input/path
+      - gs://bucket/input/path
+    jarFileUris:
+      - gs://dataloom-staging-dev/dataloom.jar
+    mainClass: com.dataloom.er.examples.Dedupe
+  stepId: dedupe
+placement:
+  managedCluster:
+    clusterName: dl-managed-cluster
+    config:
+      configBucket: dataloom-staging-dev
+      gceClusterConfig:
+        zoneUri: us-central1-a
+      workerConfig:
+        numInstances: 2
+      softwareConfig:
+        properties:
+          dataproc:alpha.autoscaling.enabled: 'true'
+          dataproc:alpha.autoscaling.primary.max_workers: '8'
+          dataproc:alpha.autoscaling.secondary.max_workers: '0'
+          dataproc:alpha.autoscaling.cooldown_period: '2m'
+          dataproc:alpha.autoscaling.scale_up.factor: '1.0'
+          dataproc:alpha.autoscaling.scale_down.factor: '0.0'
+          dataproc:alpha.autoscaling.graceful_decommission_timeout: '0m'
+parameters:
+  - name: INPUT_LOC
+    fields:
+      - jobs['dedupe'].sparkJob.args[0]
+    validation:
+      regex:
+        regexes:
+          - gs://.*
+  - name: OUTPUT_LOC
+    fields:
+      - jobs['dedupe'].sparkJob.args[1]
+    validation:
+      regex:
+        regexes:
+          - gs://.*
