@@ -1,14 +1,14 @@
 package com.dataloom.er
 
 import org.apache.commons.codec.language.DoubleMetaphone
-import org.apache.commons.text.similarity.JaroWinklerDistance
+import org.apache.commons.text.similarity.{JaroWinklerDistance, LevenshteinDistance}
 import org.apache.spark.ml.linalg.Vector
 
 object functions {
 
-  def jaccardDistance(x: Vector, y: Vector): Double = {
-    val xSet = x.toSparse.indices.toSet
-    val ySet = y.toSparse.indices.toSet
+  def jaccardDistance[T](x: Seq[T], y: Seq[T]): Double = {
+    val xSet = x.toSet
+    val ySet = y.toSet
     val intersectionSize = xSet.intersect(ySet).size.toDouble
     val unionSize = xSet.size + ySet.size - intersectionSize
     assert(unionSize > 0, "The union of two input sets must have at least 1 elements")
@@ -25,6 +25,11 @@ object functions {
     Math.max(xCont, yCont)
   }
 
+  def levDistance(nameA: String, nameB: String): Double = {
+    val lev = new LevenshteinDistance()
+    lev.apply(nameA, nameB).toDouble
+  }
+
   def jaroWrinler(nameA: String, nameB: String): Double = {
     val jaroWinkler = new JaroWinklerDistance()
     jaroWinkler.apply(nameA, nameB)
@@ -36,7 +41,6 @@ object functions {
   }
 
   def givenNameScore(nameA: String, nameB: String): Double = {
-
     val a = helpers.removePunctuation(nameA)
     val b = helpers.removePunctuation(nameB)
 
@@ -69,13 +73,13 @@ object functions {
     jaroWrinler(helpers.removePunctuation(nameA), helpers.removePunctuation(nameB))
   }
 
-  def genderClassification(genderA:String, genderB:String):Double = {
+  def genderClassification(genderA:String, genderB:String):Int = {
     (genderA, genderB) match {
-      case ("F", "F") => 1.0
-      case ("M", "M") => 2.0
-      case ("M", "F") => 3.0
-      case ("F", "M") => 3.0
-      case _ => 0.0
+      case ("F", "F") => 1
+      case ("M", "M") => 1
+      case ("M", "F") => 2
+      case ("F", "M") => 2
+      case _ => 0
     }
   }
 

@@ -2,10 +2,9 @@ package com.dataloom.er
 
 import org.apache.spark.ml.Transformer
 import org.apache.spark.ml.feature.{FeatureHasher, HashingTF, OneHotEncoder}
-import org.apache.spark.ml.linalg.{SQLDataTypes, Vectors}
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.param.shared.{HasInputCols, HasOutputCol}
-import org.apache.spark.ml.util.{DefaultParamsWritable, Identifiable, SchemaUtils}
+import org.apache.spark.ml.util.{DefaultParamsWritable, Identifiable}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -76,14 +75,12 @@ class ERUniqueHasher(override val uid: String) extends Transformer
     val outputSchema = transformSchema(dataset.schema)
 
     val hashFeatures = udf { row: Row =>
-      val hashSet = localInputCols
+      localInputCols
         .filter(c => !row.isNullAt(row.fieldIndex(c)))
         .map { c =>
           val value = row.get(row.fieldIndex(c)).toString
           value.hashCode.toDouble
         }
-
-      Vectors.dense(hashSet)
     }
 
     val metadata = outputSchema($(outputCol)).metadata
@@ -105,6 +102,6 @@ class ERUniqueHasher(override val uid: String) extends Transformer
         s"ERUniqueHasher requires columns to be of NumericType, BooleanType or StringType. " +
           s"Column $fieldName was $dataType")
     }
-    schema.add($(outputCol), DataTypes.createArrayType(SQLDataTypes.VectorType))
+    schema.add($(outputCol), DataTypes.createArrayType(DoubleType))
   }
 }

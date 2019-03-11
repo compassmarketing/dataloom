@@ -11,8 +11,10 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core" % "2.3.2" % "provided",
   "org.apache.spark" %% "spark-sql" % "2.3.2"  % "provided",
   "org.apache.spark" %% "spark-mllib" % "2.3.2"  % "provided",
+  //"com.datastax.spark" %% "spark-cassandra-connector" % "2.3.0",
   "com.databricks" %% "spark-avro" % "4.0.0",
-  "org.apache.commons" % "commons-text" % "1.1"
+  "org.apache.commons" % "commons-text" % "1.1",
+  "com.github.scopt" % "scopt_2.11" % "3.6.0"
 )
 
 assemblyShadeRules in assembly := Seq(

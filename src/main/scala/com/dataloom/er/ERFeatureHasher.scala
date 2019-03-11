@@ -4,7 +4,6 @@ import org.apache.spark.SparkException
 import org.apache.spark.ml.Transformer
 import org.apache.spark.ml.attribute.AttributeGroup
 import org.apache.spark.ml.feature.{FeatureHasher, HashingTF, OneHotEncoder}
-import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.param.shared.{HasInputCols, HasOutputCol}
 import org.apache.spark.ml.util.{DefaultParamsReadable, DefaultParamsWritable, Identifiable}
@@ -65,7 +64,7 @@ import org.apache.spark.unsafe.types.UTF8String
 class ERFeatureHasher(override val uid: String) extends Transformer
   with HasInputCols with HasOutputCol with DefaultParamsWritable {
 
-  private val FEATURES = 32768 // 2^15
+  final val FEATURES_DIM = 32768 // 2^15
 
   def this() = this(Identifiable.randomUID("asymHasher"))
 
@@ -92,21 +91,18 @@ class ERFeatureHasher(override val uid: String) extends Transformer
        */
       val qGrams = localInputCols
         .filter(c => !row.isNullAt(row.fieldIndex(c)))
-        .flatMap(c => row.get(row.fieldIndex(c)).toString.toUpperCase.split(' '))
-        .filterNot(STOP_WORDS.contains)
-        .reduce(_ + " " + _)
-        .sliding(4)
+        .map(c => row.get(row.fieldIndex(c)).toString.toUpperCase)
+        .reduce(_ + "_" + _)
+        .sliding(3)
 
       /*
        * Hash each gram into the feature space and convert to a binary
        * set.
        */
-      val hashSet = qGrams.map { gram =>
+      qGrams.map { gram =>
         val hash = hashFunc(gram)
-        (ERFeatureHasher.nonNegativeMod(hash, FEATURES), 1.0)
-      }.toSet
-
-      Vectors.sparse(FEATURES, hashSet.toSeq)
+        ERFeatureHasher.nonNegativeMod(hash, FEATURES_DIM)
+      }.toSet.toSeq
     }
 
     val metadata = outputSchema($(outputCol)).metadata
@@ -128,8 +124,7 @@ class ERFeatureHasher(override val uid: String) extends Transformer
         s"ERFeatureHasher requires columns to be of NumericType, BooleanType or StringType. " +
           s"Column $fieldName was $dataType")
     }
-    val attrGroup = new AttributeGroup($(outputCol), FEATURES)
-    schema.add(attrGroup.toStructField())
+    schema.add($(outputCol), DataTypes.createArrayType(IntegerType))
   }
 }
 

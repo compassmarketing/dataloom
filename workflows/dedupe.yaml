@@ -3,6 +3,10 @@ jobs:
     args:
       - gs://bucket/input/path
       - gs://bucket/input/path
+      - "-s"
+      - "no"
+      - "-d"
+      - PIPE
     jarFileUris:
       - gs://dataloom-staging-dev/dataloom.jar
     mainClass: com.dataloom.er.examples.Dedupe
@@ -16,11 +20,12 @@ placement:
         zoneUri: us-central1-a
       workerConfig:
         numInstances: 2
+        machineTypeUri: n1-highmem-4
       softwareConfig:
         properties:
           dataproc:alpha.autoscaling.enabled: 'true'
           dataproc:alpha.autoscaling.primary.max_workers: '8'
-          dataproc:alpha.autoscaling.secondary.max_workers: '0'
+          dataproc:alpha.autoscaling.secondary.max_workers: '1'
           dataproc:alpha.autoscaling.cooldown_period: '2m'
           dataproc:alpha.autoscaling.scale_up.factor: '1.0'
           dataproc:alpha.autoscaling.scale_down.factor: '0.0'
@@ -40,3 +45,12 @@ parameters:
       regex:
         regexes:
           - gs://.*
+  - name: DELIMITER
+    fields:
+      - jobs['dedupe'].sparkJob.args[5]
+    validation:
+      values:
+        values:
+          - COMMA
+          - PIPE
+          - TAB

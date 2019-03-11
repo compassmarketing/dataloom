@@ -1,17 +1,18 @@
 package com.dataloom.er
 
-import org.apache.spark.ml.linalg.{Vector, SQLDataTypes, Vectors}
+
+import com.dataloom.er
+import org.apache.spark.ml.linalg.{SQLDataTypes, Vector, Vectors}
 import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol, HasSeed}
 import org.apache.spark.ml.param.{IntParam, Param, ParamMap, ParamValidators}
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.{StructType, _}
-import org.apache.spark.sql.{Encoders, _}
+import org.apache.spark.sql._
+import org.apache.hadoop.fs.Path
 
 import scala.util.Random
-
 
 /**
   * Params for ER Model.
@@ -22,6 +23,7 @@ trait ERParams extends HasInputCol with HasOutputCol {
     *
     * LSH OR-amplification can be used to reduce the false negative rate. Higher values for this
     * param lead to a reduced false negative rate, at the expense of added computational complexity.
+    *
     * @group param
     */
   final val numHashTables: IntParam = new IntParam(this, "numHashTables", "number of hash " +
@@ -45,6 +47,7 @@ trait ERParams extends HasInputCol with HasOutputCol {
 
   /**
     * Param for input column names.
+    *
     * @group param
     */
   final val uniqueCol: Param[String] = new Param[String](this, "uniqueCol", "unique feature input column name")
@@ -54,19 +57,10 @@ trait ERParams extends HasInputCol with HasOutputCol {
 
   setDefault(uniqueCol -> "")
 
-  /**
-    * Param for pair column names.
-    * @group param
-    */
-  final val pairNames: Param[(String, String)] = new Param[(String, String)](this, "pairNames", "The pair names for each set of canidate pairs")
-
-  /** @group getParam */
-  final def getPairNames: (String, String) = $(pairNames)
-
-  setDefault(pairNames -> ("A", "B"))
 
   /**
     * Transform the Schema for LSH
+    *
     * @param schema The schema of the input dataset without [[outputCol]].
     * @return A derived schema with [[outputCol]] added.
     */
@@ -76,81 +70,80 @@ trait ERParams extends HasInputCol with HasOutputCol {
 }
 
 class ERModel(
-                           override val uid: String,
-                           private val randCoefficients: Array[(Int, Int)]) extends Model[ERModel] with ERParams {
+               override val uid: String,
+               private val randCoefficients: Array[(Int, Int)]) extends Model[ERModel] with ERParams with DefaultParamsWritable {
 
-
-  private def newRowFromSchema(row: Row, newSchema: StructType): Row = {
-    val fields = newSchema.fieldNames.map(n => row.get(row.schema.fieldIndex(n)))
-    Row.fromSeq(fields)
+  def this(uid: String) {
+    this(uid, Array())
   }
 
-  def candidatePairs(dataset: Dataset[Row]): Dataset[_] = {
+  def candidatePairs(
+                       dataset: Dataset[Row],
+                       idCol: String,
+                       pairNames: (String, String) = ("A", "B")): Dataset[_] = {
 
-    val schema = dataset.schema
-
-
+    import dataset.sparkSession.implicits._
     val modelDataset: DataFrame = if (!dataset.columns.contains($(outputCol))) {
       transform(dataset)
     } else {
       dataset.toDF()
     }
-    val transformed = modelDataset
-      .select(col("*"), posexplode(col($(outputCol))).as(Seq("entry", "hashValue")))
-      .withColumn("actualEntry", when(col("entry") >= $(numHashTables), $(numHashTables)).otherwise(col("entry")))
 
-    val blocks =
-      transformed.groupByKey(hr => (hr.getAs[Int]("actualEntry"), hr.getAs[Vector]("hashValue")))(Encoders.product)
-
-    val (pairA, pairB) = $(pairNames)
-    val pairs = blocks.flatMapGroups { case (_, rows) =>
-      val set = rows.toSet
-      if (set.size <= 50) {
-        set.subsets(2).map { p =>
-          (newRowFromSchema(p.head, schema), newRowFromSchema(p.last, schema))
-        }
-      } else {
-        Iterator.empty.asInstanceOf[Iterator[(Row, Row)]]
+    val transformed = modelDataset.rdd.flatMap[((Int, Seq[Double]), Long)] { row =>
+      val hashes = row.getAs[Seq[Seq[Double]]]($(outputCol))
+      hashes.zipWithIndex.map { case (hash: Seq[Double], i: Int) =>
+        val entry = if (i >= $(numHashTables)) $(numHashTables) else i
+        ((entry, hash), row.getAs[Long](idCol))
       }
-    }(Encoders.tuple(RowEncoder.apply(schema), RowEncoder.apply(schema)))
-      .toDF(pairA, pairB)
+    }
 
-    pairs.distinct()
+    val blocks = transformed.combineByKey(
+      (v: Long) => Set(v),
+      (acc: Set[Long], v: Long) => acc + v,
+      (x: Set[Long], y: Set[Long]) => x.union(y),
+      transformed.getNumPartitions * 5
+    )
+
+    val pairs = blocks.flatMap[(Long, Long)] { case (_, rows: Set[Long]) =>
+      if (rows.size <= 50) {
+        rows.subsets(2)
+          .map { p => (p.head, p.last) }
+      } else {
+        Iterator.empty.asInstanceOf[Iterator[(Long, Long)]]
+      }
+    }.distinct()
+
+    pairs.toDF(pairNames._1, pairNames._2)
   }
 
-  protected val hashFunction: Vector => Array[Vector] = {
-    elems: Vector => {
-      require(elems.numNonzeros > 0, "Must have at least 1 non zero entry.")
-
-      val elemsList = elems.toSparse.indices.toList
+  protected val hashFunction: Seq[Int] => Seq[Seq[Double]] = {
+    elems: Seq[Int] => {
       val hashValues = randCoefficients.map { case (a, b) =>
-        elemsList.map { elem: Int =>
+        elems.map { elem: Int =>
           ((1 + elem) * a + b) % ERMinHashLSH.HASH_PRIME
         }.min.toDouble
       }
-      hashValues.grouped($(numHashFunctions)).map(Vectors.dense).toArray
+      hashValues.toSeq.grouped($(numHashFunctions)).toSeq
     }
   }
 
-  protected val uniqueFunction: (Seq[Vector], Vector) => Array[Vector] = {
-    (hashes:Seq[Vector], uniques: Vector) => {
-      if (uniques.numNonzeros > 0) {
-        hashes.toArray ++ uniques.toArray.grouped(1).map(Vectors.dense)
+  protected val uniqueFunction: (Seq[Seq[Double]], Seq[Double]) => Seq[Seq[Double]] = {
+    (hashes: Seq[Seq[Double]], uniques: Seq[Double]) => {
+      if (uniques.nonEmpty) {
+        hashes ++ uniques.grouped(1)
       }
       else {
-        hashes.toArray
+        hashes
       }
     }
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
     transformSchema(dataset.schema, logging = true)
-    val transformUDF = udf(hashFunction(_: Vector), DataTypes.createArrayType(SQLDataTypes.VectorType))
-    val uniquesUDF = udf(uniqueFunction(_:Seq[Vector], _: Vector), DataTypes.createArrayType(SQLDataTypes.VectorType))
+    val transformUDF = udf(hashFunction(_: Seq[Int]), DataTypes.createArrayType(DataTypes.createArrayType(DoubleType)))
+    val uniquesUDF = udf(uniqueFunction(_: Seq[Seq[Double]], _: Seq[Double]), DataTypes.createArrayType(DataTypes.createArrayType(DoubleType)))
 
     if (!$(uniqueCol).isEmpty) {
-      // TODO: Require uniqueCol to be array column of DenseVector[Int]
-
       dataset
         .withColumn($(outputCol), uniquesUDF(transformUDF(col($(inputCol))), col($(uniqueCol))))
     }
@@ -166,6 +159,28 @@ class ERModel(
   override def copy(extra: ParamMap): ERModel = {
     val copied = new ERModel(uid, randCoefficients).setParent(parent)
     copyValues(copied, extra)
+  }
+
+  override def save(path: String): Unit = this.save(path, false)
+
+  def save(path: String, overwrite: Boolean): Unit = {
+
+    if (overwrite) {
+      this.write.overwrite()
+    }
+    else {
+      this.write
+    }.save(path) // Write params
+
+    val erWriter = new er.ERModel.ERModelWriter(this)
+    val dataPath = new Path(path, "data").toString
+
+    if (overwrite) {
+      erWriter.overwrite()
+    }
+    else {
+      erWriter
+    }.save(dataPath) // Write random coefficients
   }
 
 }
@@ -193,25 +208,27 @@ class ERMinHashLSH(override val uid: String) extends Estimator[ERModel] with ERP
   def createRawLSHModel(inputDim: Int): ERModel = {
     require(inputDim <= ERMinHashLSH.HASH_PRIME,
       s"The input vector dimension $inputDim exceeds the threshold ${ERMinHashLSH.HASH_PRIME}.")
+
+
     val rand = new Random($(seed))
     val randCoefs: Array[(Int, Int)] = Array.fill($(numHashTables) * $(numHashFunctions)) {
       (1 + rand.nextInt(ERMinHashLSH.HASH_PRIME - 1), rand.nextInt(ERMinHashLSH.HASH_PRIME - 1))
     }
-    new ERModel(uid, randCoefs)
+    val model = new ERModel(uid, randCoefs)
+    copyValues(model)
   }
 
   override def fit(dataset: Dataset[_]): ERModel = {
     transformSchema(dataset.schema, logging = true)
-    val inputDim = dataset.select(col($(inputCol))).head().get(0).asInstanceOf[Vector].size
-    val model = createRawLSHModel(inputDim).setParent(this)
-    copyValues(model)
+    val inputDim = dataset.select(col($(inputCol))).head().get(0).asInstanceOf[Seq[Int]].length
+    createRawLSHModel(inputDim).setParent(this)
   }
 
   override def transformSchema(schema: StructType): StructType = {
-    require(schema($(inputCol)).dataType.equals(SQLDataTypes.VectorType), s"Input column must be a Vector data type.")
+    require(schema($(inputCol)).dataType.equals(DataTypes.createArrayType(IntegerType)), s"Input column must be a Vector data type.")
 
     if (!$(uniqueCol).isEmpty) {
-      require(schema($(uniqueCol)).dataType.equals(SQLDataTypes.VectorType), s"Unique column must be a Vector data type.")
+      require(schema($(uniqueCol)).dataType.equals(DataTypes.createArrayType(DoubleType)), s"Unique column must be a Vector data type.")
     }
 
     validateAndTransformSchema(schema)
@@ -224,4 +241,44 @@ class ERMinHashLSH(override val uid: String) extends Estimator[ERModel] with ERP
 object ERMinHashLSH {
   // A large prime smaller than sqrt(2^63 − 1)
   private[er] val HASH_PRIME = 2147483647
+}
+
+
+object ERModel extends DefaultParamsReadable[ERModel] {
+
+  override def load(path: String): ERModel = {
+    val model = this.read.load(path)
+
+    val erReader = new ERModelReader()
+    val erModel = erReader.load(path)
+
+    model.copyValues(erModel)
+  }
+
+  private[ERModel] class ERModelWriter(instance: ERModel)
+    extends MLWriter {
+
+    private case class Data(randCoefficients: Array[Int])
+
+    override def saveImpl(path: String): Unit = {
+      val data = Data(instance.randCoefficients.flatMap(tuple => Array(tuple._1, tuple._2)))
+      sparkSession.createDataFrame(Seq(data)).repartition(1).write.parquet(path)
+    }
+  }
+
+  private class ERModelReader extends MLReader[ERModel] {
+
+    /** Checked against metadata when loading model */
+    private val className = classOf[ERModel].getName
+
+    override def load(path: String): ERModel = {
+      val dataPath = new Path(path, "data").toString
+      val data = sparkSession.read.parquet(dataPath).select("randCoefficients").head()
+      val randCoefficients = data.getAs[Seq[Int]](0).grouped(2)
+        .map(tuple => (tuple(0), tuple(1))).toArray
+
+      new ERModel("rand", randCoefficients)
+    }
+  }
+
 }
