@@ -77,6 +77,8 @@ class ERModel(
     this(uid, Array())
   }
 
+  type Entity = (Long, Array[Int])
+
   def candidatePairs(
                        dataset: Dataset[Row],
                        idCol: String,
@@ -104,16 +106,16 @@ class ERModel(
       transformed.getNumPartitions * 5
     )
 
-    val pairs = blocks.flatMap[(Long, Long)] { case (_, rows: Set[Long]) =>
+    val pairs = blocks.flatMap[((Long, Long), Boolean)] { case (key: (Int, Seq[Double]), rows: Set[Long]) =>
       if (rows.size <= 50) {
         rows.subsets(2)
-          .map { p => (p.head, p.last) }
+          .map { p => ((p.head, p.last), key._1 == $(numHashTables)) }
       } else {
-        Iterator.empty.asInstanceOf[Iterator[(Long, Long)]]
+        Iterator.empty.asInstanceOf[Iterator[((Long, Long), Boolean)]]
       }
-    }.distinct()
+    }.reduceByKey(_ || _).map(p => (p._1._1, p._1._2, p._2))
 
-    pairs.toDF(pairNames._1, pairNames._2)
+    pairs.toDF(pairNames._1, pairNames._2, "unique")
   }
 
   protected val hashFunction: Seq[Int] => Seq[Seq[Double]] = {

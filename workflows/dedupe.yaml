@@ -3,12 +3,12 @@ jobs:
     args:
       - gs://bucket/input/path
       - gs://bucket/input/path
-      - "-s"
-      - "no"
+      - "-p"
+      - "10"
       - "-d"
       - PIPE
     jarFileUris:
-      - gs://dataloom-staging-dev/dataloom.jar
+      - gs://dataloom-infra-prod/artifacts/dataloom.jar
     mainClass: com.dataloom.er.examples.Dedupe
   stepId: dedupe
 placement:
@@ -45,6 +45,13 @@ parameters:
       regex:
         regexes:
           - gs://.*
+  - name: OUT_PARTS
+    fields:
+      - jobs['dedupe'].sparkJob.args[3]
+    validation:
+      regex:
+        regexes:
+          - \d+
   - name: DELIMITER
     fields:
       - jobs['dedupe'].sparkJob.args[5]

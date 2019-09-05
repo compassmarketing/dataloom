@@ -92,7 +92,7 @@ class ERFeatureHasher(override val uid: String) extends Transformer
       val qGrams = localInputCols
         .filter(c => !row.isNullAt(row.fieldIndex(c)))
         .map(c => row.get(row.fieldIndex(c)).toString.toUpperCase)
-        .reduce(_ + "_" + _)
+        .reduceOption(_ + "_" + _).getOrElse("")
         .sliding(3)
 
       /*

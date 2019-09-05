@@ -4,7 +4,7 @@ import com.dataloom.er.{ConnectedComponents, ERFeatureHasher, ERMinHashLSH, ERUn
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{BooleanType, CharType, IntegerType, LongType}
+import org.apache.spark.sql.types._
 import org.apache.spark.storage.StorageLevel
 import com.dataloom.er.functions._
 import com.dataloom.utils.{FileUtils, SchemaUtils}
@@ -31,25 +31,18 @@ object Dedupe {
   final val VERSION = "0.0.1"
 
   final val DL_ID = "DL_Id"
-  final val DL_PERSONID = "DL_PersonId"
-  final val DL_HOUSEHOLDID = "DL_HouseholdId"
-  final val DL_FNAME = "DL_FirstName"
-  final val DL_LNAME = "DL_LastName"
-  final val DL_GENDER = "DL_Gender"
-
-  final val REQUIRED_ATTRIBUTES = Array(
-    DL_FNAME,
-    DL_LNAME,
-    DL_GENDER
-  )
+  final val DL_BREAKGROUP = "DL_BreakGroup"
 
   final val FEATURE_ATTRIBUTES = Array(
-    s"^$DL_LNAME$$",
+    "^DL_FirstName$",
+    "^DL_LastName$",
+    "^DL_Gender$",
     "^DL_Street1$",
     "^DL_Street2$",
     "^DL_PostalCode$",
     "^DL_Title$",
-    "^DL_Firm$"
+    "^DL_Firm$",
+    "^DL_DOB_Year$"
   )
 
   final val UNIQUE_ATTRIBUTES = Array(
@@ -65,7 +58,7 @@ object Dedupe {
                          inputLoc: String = "",
                          outputLoc: String = "",
                          delimiter: String = "|",
-                         surnameChange: Boolean = false)
+                         outParts: Int = 10)
 
   def parseArgs(args: Array[String]): ArgsConfig = {
     val parser = new scopt.OptionParser[ArgsConfig]("Dedupe") {
@@ -97,15 +90,10 @@ object Dedupe {
           }
         }
         .text("csv column delimiter")
-      opt[String]('s', "surname")
-        .valueName("surnameChange")
-        .validate {
-          case "yes" => success
-          case "no" => success
-          case _ => failure("Value <diif_surname> must be 'yes' or 'no'")
-        }
-        .action((x, c) => c.copy(surnameChange = x == "yes"))
-        .text("allow surname change, (yes|no)")
+      opt[Int]('p', "parts")
+        .valueName("outParts")
+        .action((x, c) => c.copy(outParts = x))
+        .text("number of output partitions")
     }
 
     parser.parse(args, ArgsConfig()) match {
@@ -124,62 +112,6 @@ object Dedupe {
     ds.withColumn("cliqueSize", count(col(DL_ID)).over(byClique)).where(col("cliqueSize") > 1)
   }
 
-  /**
-    * Determine the match level between two candidate pairs.
-    *
-    * 3 = Individual Match - This estimates that the records are the same individual.
-    * 2 = Family Match - This estimates that the records belong to the same family.
-    * 1 = Location Match - This estimates that the records exist at the same location.
-    * 0 = No Match - This indicates the records linked by a unique column, but were
-    * not considered a match.
-    *
-    * @param a - First candidate pair.
-    * @param b - Second candidate pair.
-    */
-  def matchLevel(a: Row, b: Row): Int = {
-    val aFN = SchemaUtils.getAsOrElse[String](a, DL_FNAME, "").toUpperCase
-    val bFN = SchemaUtils.getAsOrElse[String](b, DL_FNAME, "").toUpperCase
-    val aLN = SchemaUtils.getAsOrElse[String](a, DL_LNAME, "").toUpperCase
-    val bLN = SchemaUtils.getAsOrElse[String](b, DL_LNAME, "").toUpperCase
-    val aG = SchemaUtils.getAsOrElse[String](a, DL_GENDER, "").toUpperCase
-    val bG = SchemaUtils.getAsOrElse[String](b, DL_GENDER, "").toUpperCase
-
-    val aFeatures = a.getAs[Seq[Int]]("features")
-    val bFeatures = b.getAs[Seq[Int]]("features")
-
-    val aUniques = a.getAs[Seq[Double]]("uniques")
-    val bUniques = b.getAs[Seq[Double]]("uniques")
-
-    val gnScore = givenNameScore(aFN, bFN)
-    val revGnScore = givenNameScore(aFN, bLN)
-    val famScore = familyNameScore(aLN, bLN)
-    val revFamScore = familyNameScore(aLN, bFN)
-    val dblmetaScore = doubleMetaBinary(aFN, bFN)
-    val genderClass = genderClassification(aG, bG)
-    val featureScore = jaccardDistance(aFeatures, bFeatures)
-    val uniqueScore = aUniques.intersect(bUniques).length
-
-    val householdMatch = featureScore <= 0.30 || uniqueScore > 0
-
-    if (householdMatch && revGnScore >= 0.95 && revFamScore >= 0.95 && genderClass != 2) { // Flipped Names
-      3
-    }
-    else if (householdMatch && gnScore >= 0.85 && famScore >= 0.90 && genderClass != 2) { // Name Match
-      3
-    }
-    else if (householdMatch && dblmetaScore >= 1.0 && famScore >= 0.90 && genderClass == 1) { // Nickname Match
-      3
-    }
-    else if (householdMatch && famScore >= 0.90) { // Family Match
-      2
-    } // Family Match
-    else if (householdMatch) {
-      1
-    } // Location Match
-    else {
-      0
-    } // Unique Match e.g. Phone, Email, IP, etc...
-  }
 
   /**
     * Stage 1 - This stage reads the input location and does the following:
@@ -206,7 +138,9 @@ object Dedupe {
       .option("MODE", "DROPMALFORMED")
       .csv(inputLoc)
 
-    SchemaUtils.validateInputSchema(sourceDF.schema, REQUIRED_ATTRIBUTES)
+    if (SchemaUtils.getCols(sourceDF.schema, "^DL_*").length == 0) {
+      throw new Exception("No Dataloom columns found")
+    }
 
     // Generate positive unique ID's across the input data set.
     val profiles = sourceDF
@@ -223,15 +157,13 @@ object Dedupe {
       * the values to reduce the memory requirements, but also to conform to the feature hash
       * data type.
       */
-    val dataloomDF = profiles.select(SchemaUtils.getCols(profiles.schema, "^DL_*").map(col): _*)
-
     val hashingTF = new ERFeatureHasher()
-      .setInputCols(SchemaUtils.getCols(dataloomDF.schema, FEATURE_ATTRIBUTES): _*)
+      .setInputCols(SchemaUtils.getCols(profiles.schema, FEATURE_ATTRIBUTES): _*)
       .setOutputCol("features")
-    val featurized = hashingTF.transform(dataloomDF)
+    val featurized = hashingTF.transform(profiles)
 
     val uniqueTF = new ERUniqueHasher()
-      .setInputCols(SchemaUtils.getCols(dataloomDF.schema, UNIQUE_ATTRIBUTES): _*)
+      .setInputCols(SchemaUtils.getCols(profiles.schema, UNIQUE_ATTRIBUTES): _*)
       .setOutputCol("uniques")
     val unique = uniqueTF.transform(featurized)
 
@@ -253,56 +185,37 @@ object Dedupe {
     val stage2Path = new Path(options.outputLoc, "stage2").toString
 
     // Get need cols for matching
-    val reqCols = REQUIRED_ATTRIBUTES.union(Array(DL_ID, "features", "uniques")).map(col)
-    val records = spark.read.parquet(stage1Path).select(reqCols: _*)
+    val records = spark.read.parquet(stage1Path).select(DL_ID, "features", "uniques")
     records.persist(StorageLevel.MEMORY_AND_DISK_SER)
 
     val mh = new ERMinHashLSH()
       .setNumHashFunctions(6) // r
       .setNumHashTables(6) // b
       .setInputCol("features")
-      .setOutputCol("hashes")
       .setUniqueCol("uniques")
+      .setOutputCol("hashes")
 
     val model = mh.fit(records)
 
+    val req = records.select(DL_ID, "features")
     val (pairA, pairB) = ("A", "B")
     val pairs = model
       .candidatePairs(records, DL_ID, (pairA, pairB))
-      .join(records, col(pairA) === records(DL_ID)).select(struct(records("*")).as(pairA), col(pairB))
-      .join(records, col(pairB) === records(DL_ID)).select(col(pairA), struct(records("*")).as(pairB))
+      .join(req, col(pairA) === req(DL_ID)).select(struct(req("*")).as(pairA), col(pairB), col("unique"))
+      .join(req, col(pairB) === req(DL_ID)).select(col(pairA), struct(req("*")).as(pairB),  col("unique"))
 
     /**
       * Generate the match level for each pair.
       */
-    val matcher = udf((a: Row, b: Row) => matchLevel(a, b), IntegerType)
-    val matches = pairs.select($"$pairA.$DL_ID".as(pairA), $"$pairB.$DL_ID".as(pairB), matcher(col(pairA), col(pairB)).as("level"))
-    matches.persist(StorageLevel.MEMORY_AND_DISK_SER)
+    val jaccardDis = udf((a: Seq[Int], b: Seq[Int]) => jaccardDistance(a,b), DoubleType)
+    val matches = pairs
+      .filter($"unique".equalTo(true).or(jaccardDis($"$pairA.features", $"$pairB.features") <= 0.3))
+      .select($"$pairA.$DL_ID".as(pairA), $"$pairB.$DL_ID".as(pairB))
+      .map(r => (r.getAs[Long](0), r.getAs[Long](1)))
 
-    /**
-      * Gather cliques for the Person Match Level.
-      */
-    val lvl1Edges = matches.filter($"level" >= 3).rdd.map(r => (r.getAs[Long](0), r.getAs[Long](1)))
-    val lvl1Cliques = ConnectedComponents.groupEdges(lvl1Edges, 5).toDF(DL_ID, DL_PERSONID)
+    val cliques = ConnectedComponents.groupEdges(matches.rdd, 5).toDF(DL_ID, DL_BREAKGROUP)
 
-    /**
-      * Gather cliques for the Household Match Level.
-      */
-    val lvl2Edges = matches.filter($"level" >= 2).rdd.map(r => (r.getAs[Long](0), r.getAs[Long](1)))
-    val lvl2Cliques = ConnectedComponents.groupEdges(lvl2Edges, 5).toDF(DL_ID, DL_HOUSEHOLDID)
-
-    /**
-      * Left join back to records
-      */
-    val cc1 = records
-      .join(lvl1Cliques, records(DL_ID) === lvl1Cliques(DL_ID), "left")
-      .select(records(DL_ID), when(isnull(lvl1Cliques(DL_PERSONID)), records(DL_ID)).otherwise(lvl1Cliques(DL_PERSONID)).as(DL_PERSONID))
-
-    val cc2 = cc1
-      .join(lvl2Cliques, cc1(DL_ID) === lvl2Cliques(DL_ID), "left")
-      .select(cc1("*"), when(isnull(lvl2Cliques(DL_HOUSEHOLDID)), cc1(DL_ID)).otherwise(lvl2Cliques(DL_HOUSEHOLDID)).as(DL_HOUSEHOLDID))
-
-    cc2.write.mode("overwrite").parquet(stage2Path)
+    cliques.write.mode("overwrite").parquet(stage2Path)
     records.unpersist()
   }
 
@@ -312,7 +225,7 @@ object Dedupe {
     * @param spark
     * @param options
     */
-  def stage3(spark: SparkSession, numOfMB:Double, options: ArgsConfig): Unit = {
+  def stage3(spark: SparkSession, options: ArgsConfig): Unit = {
     val stage1Path = new Path(options.outputLoc, "stage1").toString
     val stage2Path = new Path(options.outputLoc, "stage2").toString
     val stage3Path = new Path(options.outputLoc, "stage3").toString
@@ -320,17 +233,18 @@ object Dedupe {
     val original = spark.read.parquet(stage1Path).drop("features", "uniques")
     val result = spark.read.parquet(stage2Path)
 
-    val readableParts = Math.ceil(1 + numOfMB / 1024).toInt
-
     val full = original
       .join(result, original(DL_ID) === result(DL_ID))
-      .select(original("*"), result(DL_PERSONID), result(DL_HOUSEHOLDID))
+      .select(original("*"), result(DL_BREAKGROUP))
 
     full
-      .coalesce(readableParts)
+      .sortWithinPartitions(DL_BREAKGROUP)
+      .coalesce(options.outParts)
       .write
       .mode("overwrite")
-      .avro(stage3Path)
+      .option("header", "true")
+      .option("compression", "gzip")
+      .csv(stage3Path)
   }
 
   def main(args: Array[String]) {
@@ -344,19 +258,15 @@ object Dedupe {
 
     // Estimate the file size to determine number of partitions.
     val numOfMB = FileUtils.getSparkFileSize(options.inputLoc, spark.sparkContext) / 1048576.0
-    var parts = Math.ceil(1 + numOfMB / 64).toInt
-
-    if (options.inputLoc.endsWith(".gz")) {
-      parts = parts * 2
-    } // Double the amount of partitions if gzip
+    val parts = Math.ceil(1 + numOfMB / 64).toInt
     spark.conf.set("spark.sql.shuffle.partitions", parts.toString)
 
     stage1(spark, parts, options)
     stage2(spark, options)
-    stage3(spark, numOfMB, options)
+    stage3(spark, options)
 
-//    val pairs = spark.read.parquet(options.outputLoc.concat("/stage2"))
-//    println(getMatchSize(pairs, DL_PERSONID).count())
+//    val pairs = spark.read.option("header","true").csv(options.outputLoc.concat("/stage3"))
+//    getMatchSize(pairs, DL_BREAKGROUP).show(100, false)
     //System.in.read
 
   }

@@ -2,7 +2,7 @@ lazy val commonSettings = Seq(
   organization := "Dataloom",
   name := "dataloom",
   version := "0.1",
-  scalaVersion := "2.11.8",
+  scalaVersion := "2.11.8"
 )
 lazy val shaded = (project in file("."))
   .settings(commonSettings)
@@ -16,6 +16,10 @@ libraryDependencies ++= Seq(
   "org.apache.commons" % "commons-text" % "1.1",
   "com.github.scopt" % "scopt_2.11" % "3.6.0"
 )
+
+resolvers += "bintray-spark-packages" at "https://dl.bintray.com/spark-packages/maven/"
+libraryDependencies += "MrPowers" % "spark-fast-tests" % "2.2.0_0.5.0" % "test"
+libraryDependencies += "mrpowers" % "spark-daria" % "2.2.1_0.18.0" % "test"
 
 assemblyShadeRules in assembly := Seq(
   ShadeRule.rename("com.google.common.**" -> "repackaged.com.google.common.@1").inAll

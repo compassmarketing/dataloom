@@ -14,7 +14,13 @@ object FileUtils {
       val files = fs.listFiles(file, false)
       var size = 0L
       while(files.hasNext) {
-        size += files.next().getLen
+        val f = files.next()
+        if (f.getPath.toString.endsWith(".gz")) {
+          size += f.getLen * 4
+        }
+        else {
+          size += f.getLen
+        }
       }
       size
     }
